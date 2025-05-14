@@ -1,0 +1,162 @@
+1.	# Import required scientific computing packages  
+2.	# A units and constants package is needed, download at http://pypi.python.org/pypi/numericalunits  
+3.	import numpy as np  
+4.	import scipy.interpolate, scipy.integrate, pandas, sys  
+5.	assert sys.version_info >= (3,6), 'Requires Python 3.6+'  
+6.	  
+7.	# Import physical constants and units from custom package  
+8.	from numericalunits import W, K, nm, m, cm, s, eV, meV, V, mA, c0, hPlanck, kB, e  
+9.	Tcell = 300 * K  # Standard operating temperature for solar cells (300K)  
+10.	  
+11.	# Load AM1.5G solar spectrum data from Excel file  
+12.	worksheet = pandas.read_excel('AM 1.5G.xls')  
+13.	downloaded_array = np.array(worksheet)  
+14.	  
+15.	# Extract wavelength (column 0) and spectral irradiance (column 2)  
+16.	AM15 = downloaded_array[1:, [0,2]]  
+17.	  
+18.	# Convert units: wavelength to nm, irradiance to W/m2/nm  
+19.	AM15[:,0] *= nm  
+20.	AM15[:,1] *= W / m**2 / nm  
+21.	  
+22.	# Define wavelength range for analysis (280-4000nm)  
+23.	λ_min = 280 * nm  # Minimum wavelength (UV cutoff)  
+24.	λ_max = 4000 * nm  # Maximum wavelength (IR cutoff)  
+25.	E_min = hPlanck * c0 / λ_max  # Convert to minimum photon energy  
+26.	E_max = hPlanck * c0 / λ_min  # Convert to maximum photon energy  
+27.	  
+28.	# Create interpolation function for solar spectrum  
+29.	AM15interp = scipy.interpolate.interp1d(AM15[:,0], AM15[:,1])  
+30.	  
+31.	# Function to calculate photon flux per unit energy interval  
+32.	def SPhotonsPerTEA(Ephoton):  
+33.	    """Calculate photon flux density per unit energy interval at given photon energy. 
+34.	    Args: 
+35.	        Ephoton: Photon energy in eV 
+36.	    Returns: 
+37.	        Photon flux density in m-2·s-1·eV-1 
+38.	    """  
+39.	    λ = hPlanck * c0 / Ephoton  # Convert energy to wavelength  
+40.	    return AM15interp(λ) * (1 / Ephoton) * (hPlanck * c0 / Ephoton**2)  
+41.	  
+42.	# Function to calculate power per unit energy interval  
+43.	PowerPerTEA = lambda E : E * SPhotonsPerTEA(E)  # Power density in W/m2/eV  
+44.	  
+45.	# Calculate total solar constant (integrated power density)  
+46.	solar_constant = scipy.integrate.quad(PowerPerTEA,E_min,E_max, full_output=1)[0]  
+47.	  
+48.	# Function to calculate integrated photon flux above bandgap  
+49.	def solar_photons_above_gap(Egap):  
+50.	    """Calculate total photon flux with energy above bandgap. 
+51.	    Args: 
+52.	        Egap: Bandgap energy in eV 
+53.	    Returns: 
+54.	        Integrated photon flux in m-2·s-1 
+55.	    """  
+56.	    return scipy.integrate.quad(SPhotonsPerTEA, Egap, E_max, full_output=1)[0]  
+57.	  
+58.	# Function to calculate radiative recombination rate  
+59.	def RR0(Egap):  
+60.	    """Calculate radiative recombination rate in dark equilibrium. 
+61.	    Args: 
+62.	        Egap: Bandgap energy in eV 
+63.	    Returns: 
+64.	        Recombination rate in m-2·s-1 
+65.	    """  
+66.	    integrand = lambda E : E**2 / (np.exp(E / (kB * Tcell)) - 1)  # Planck's law  
+67.	    integral = scipy.integrate.quad(integrand, Egap, E_max, full_output=1)[0]  # Integrate  
+68.	    return ((2 * np.pi) / (c0**2 * hPlanck**3)) * integral  # Prefactor from detailed balance  
+69.	  
+70.	# Function to calculate current density  
+71.	def current_density(voltage, Egap):  
+72.	    """Calculate current density at given voltage and bandgap. 
+73.	    Args: 
+74.	        voltage: Applied voltage in V 
+75.	        Egap: Bandgap energy in eV 
+76.	    Returns: 
+77.	        Current density in A/m2 
+78.	    """  
+79.	    return e * (solar_photons_above_gap(Egap) - RR0(Egap) * np.exp(e * voltage / (kB * Tcell)))  
+80.	  
+81.	# Short-circuit current (JSC at V=0)  
+82.	def JSC(Egap):  
+83.	    return current_density(0, Egap)  
+84.	  
+85.	# Open-circuit voltage (voltage when J=0)  
+86.	def VOC(Egap):  
+87.	    return (kB * Tcell / e) * np.log(solar_photons_above_gap(Egap) / RR0(Egap))  
+88.	  
+89.	# Optimization function to find maximum power point  
+90.	from scipy.optimize import fmin  
+91.	  
+92.	def fmax(func_to_maximize, initial_guess=0):  
+93.	    """Find the argument that maximizes a function. 
+94.	    Args: 
+95.	        func_to_maximize: Function to maximize 
+96.	        initial_guess: Starting point for optimization 
+97.	    Returns: 
+98.	        x value that maximizes the function 
+99.	    """  
+100.	    func_to_minimize = lambda x : -func_to_maximize(x)  # Convert to minimization  
+101.	    return fmin(func_to_minimize, initial_guess, disp=False)[0]  # Find minimum  
+102.	  
+103.	# Functions for maximum power point analysis  
+104.	def V_mpp(Egap):  
+105.	    """Calculate voltage at maximum power point. 
+106.	    Args: 
+107.	        Egap: Bandgap energy in eV 
+108.	    Returns: 
+109.	        Voltage in V 
+110.	    """  
+111.	    return fmax(lambda voltage : voltage * current_density(voltage, Egap))  
+112.	  
+113.	def J_mpp(Egap):  
+114.	    """Calculate current density at maximum power point. 
+115.	    Args: 
+116.	        Egap: Bandgap energy in eV 
+117.	    Returns: 
+118.	        Current density in A/m² 
+119.	    """  
+120.	    return current_density(V_mpp(Egap), Egap)  
+121.	  
+122.	def max_power(Egap):  
+123.	    """Calculate maximum power density. 
+124.	    Args: 
+125.	        Egap: Bandgap energy in eV 
+126.	    Returns: 
+127.	        Power density in W/m2 
+128.	    """  
+129.	    voltage = V_mpp(Egap)  
+130.	    return voltage * current_density(voltage, Egap)  
+131.	  
+132.	def max_efficiency(Egap):  
+133.	    """Calculate maximum conversion efficiency. 
+134.	    Args: 
+135.	        Egap: Bandgap energy in eV 
+136.	    Returns: 
+137.	        Efficiency as fraction (0-1) 
+138.	    """  
+139.	    return max_power(Egap) / solar_constant  
+140.	  
+141.	# Function to calculate fill factor  
+142.	def fill_factor(Egap):  
+143.	    """Calculate fill factor. 
+144.	    Args: 
+145.	        Egap: Bandgap energy in eV 
+146.	    Returns: 
+147.	        Fill factor (0-1) 
+148.	    """  
+149.	    return max_power(Egap) / (JSC(Egap) * VOC(Egap))  
+150.	  
+151.	# Calculate all photovoltaic parameters across bandgap range  
+152.	Egap_list = np.linspace(0.4 * eV, 3 * eV, num=100)  
+153.	JSC_list = np.array([JSC(E) for E in Egap_list])  
+154.	VOC_list = np.array([VOC(E) for E in Egap_list])  
+155.	eff_list = np.array([max_efficiency(E) for E in Egap_list])  
+156.	FF_list = np.array([fill_factor(E) for E in Egap_list])  
+157.	  
+158.	# Save calculated data to text files  
+159.	np.savetxt("eff_list1.txt", eff_list, fmt='%f', delimiter=',')  # Efficiency  
+160.	np.savetxt("VOC_list1.txt", VOC_list / V, fmt='%f', delimiter=',')# VOC in volts  
+161.	np.savetxt("JSC_list1.txt", JSC_list / (mA / cm**2), fmt='%f', delimiter=',')  # JSC in mA/cm2  
+162.	np.savetxt("FF.txt", FF_list, fmt='%f', delimiter=',')  # Fill factor  
